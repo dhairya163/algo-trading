@@ -48,6 +48,16 @@ class Settings(BaseSettings):
     groww_api_secret: Optional[SecretStr] = Field(default=None, description="Groww API Secret")
 
     # -------------------------------------------------------------------------
+    # OpenAI API Configuration
+    # -------------------------------------------------------------------------
+    openai_api_key: Optional[SecretStr] = Field(
+        default=None, description="OpenAI API Key for stock analysis"
+    )
+    openai_model: str = Field(
+        default="gpt-4o", description="OpenAI model to use (gpt-4o, gpt-4o-mini)"
+    )
+
+    # -------------------------------------------------------------------------
     # Sentiment Data Source API Keys
     # -------------------------------------------------------------------------
     alpha_vantage_api_key: Optional[SecretStr] = Field(
