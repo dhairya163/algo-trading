@@ -571,31 +571,38 @@ Find the best investment opportunities. Return valid JSON array."""
 {sector_focus}
 {exclude_str}
 
-Return JSON array with stocks across LOW, MEDIUM, and HIGH risk categories:
-[
-    {{
-        "symbol": "SYMBOL",
-        "company_name": "Name",
-        "recommendation": "BUY|STRONG_BUY",
-        "confidence": <0-100>,
-        "risk_level": "LOW|MEDIUM|HIGH",
-        "current_price": <price>,
-        "target_price": <target>,
-        "stop_loss": <stop loss>,
-        "upside_potential": <percentage>,
-        "news_sentiment": "<news>",
-        "technical_outlook": "<technicals>",
-        "fundamental_view": "<fundamentals>",
-        "catalysts": ["catalyst"],
-        "risks": ["risk"],
-        "buffett_score": <0-100>,
-        "lynch_score": <0-100>,
-        "jhunjhunwala_score": <0-100>,
-        "reasoning": "<reasoning with investor framework>"
-    }}
-]
+Return a JSON object with a "stocks" array containing stocks across LOW, MEDIUM, and HIGH risk categories:
+{{
+    "stocks": [
+        {{
+            "symbol": "SYMBOL",
+            "company_name": "Full Company Name",
+            "recommendation": "BUY",
+            "confidence": 75,
+            "risk_level": "LOW",
+            "current_price": 1500.00,
+            "target_price": 1800.00,
+            "stop_loss": 1400.00,
+            "upside_potential": 20.0,
+            "news_sentiment": "Recent positive news summary",
+            "technical_outlook": "Technical analysis summary",
+            "fundamental_view": "Fundamental outlook",
+            "catalysts": ["Upcoming catalyst 1", "Catalyst 2"],
+            "risks": ["Key risk 1", "Risk 2"],
+            "buffett_score": 80,
+            "lynch_score": 70,
+            "jhunjhunwala_score": 65,
+            "reasoning": "Detailed 2-3 sentence reasoning explaining WHY to buy this stock now, which investor framework supports it, and what makes it attractive at current levels."
+        }}
+    ]
+}}
 
-Include 1-2 stocks from each risk category. Use current market knowledge."""
+IMPORTANT:
+- Include 1-2 stocks from each risk category (LOW, MEDIUM, HIGH)
+- Use current January 2025 market knowledge
+- Provide DETAILED reasoning for each stock explaining WHY to buy
+- All prices in INR
+- reasoning field should be comprehensive (2-3 sentences minimum)"""
 
         try:
             response = self._client.chat.completions.create(
@@ -605,9 +612,20 @@ Include 1-2 stocks from each risk category. Use current market knowledge."""
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.4,
+                response_format={"type": "json_object"},
             )
 
             content = response.choices[0].message.content
+            # Wrap in array if it's an object with stocks key
+            if content.strip().startswith("{"):
+                try:
+                    data = json.loads(content)
+                    if "stocks" in data:
+                        content = json.dumps(data["stocks"])
+                    elif "recommendations" in data:
+                        content = json.dumps(data["recommendations"])
+                except:
+                    pass
             return self._parse_opportunities_response(content)
 
         except Exception as e:
@@ -616,46 +634,93 @@ Include 1-2 stocks from each risk category. Use current market knowledge."""
 
     def _parse_opportunities_response(self, response_text: str) -> list[StockResearch]:
         """Parse opportunities response into list of StockResearch."""
+        import re
 
         try:
-            # Parse JSON array
-            json_start = response_text.find("[")
-            json_end = response_text.rfind("]") + 1
+            # First try to find a JSON object with "stocks" key
+            if '"stocks"' in response_text:
+                obj_start = response_text.find("{")
+                # Find matching closing brace
+                brace_count = 0
+                obj_end = -1
+                for i, char in enumerate(response_text[obj_start:], obj_start):
+                    if char == '{':
+                        brace_count += 1
+                    elif char == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            obj_end = i + 1
+                            break
+                if obj_end > obj_start:
+                    json_str = response_text[obj_start:obj_end]
+                    json_str = re.sub(r',\s*]', ']', json_str)
+                    json_str = re.sub(r',\s*}', '}', json_str)
+                    data = json.loads(json_str)
+                    if "stocks" in data:
+                        stocks_data = data["stocks"]
+                    elif "recommendations" in data:
+                        stocks_data = data["recommendations"]
+                    else:
+                        stocks_data = list(data.values())[0] if data else []
+            else:
+                # Parse JSON array directly
+                json_start = response_text.find("[")
+                # Find matching closing bracket
+                bracket_count = 0
+                json_end = -1
+                for i, char in enumerate(response_text[json_start:], json_start):
+                    if char == '[':
+                        bracket_count += 1
+                    elif char == ']':
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            json_end = i + 1
+                            break
 
-            if json_start >= 0 and json_end > json_start:
-                stocks_data = json.loads(response_text[json_start:json_end])
+                if json_start >= 0 and json_end > json_start:
+                    json_str = response_text[json_start:json_end]
+                    # Clean up common JSON issues
+                    json_str = re.sub(r',\s*]', ']', json_str)
+                    json_str = re.sub(r',\s*}', '}', json_str)
+                    stocks_data = json.loads(json_str)
+                else:
+                    logger.error("No valid JSON array found in response")
+                    return []
 
-                opportunities = []
-                for stock in stocks_data:
-                    # Parse risk level
-                    risk_str = stock.get("risk_level", "MEDIUM").upper()
-                    try:
-                        risk_level = RiskLevel(risk_str)
-                    except ValueError:
-                        risk_level = RiskLevel.MEDIUM
+            if not isinstance(stocks_data, list):
+                stocks_data = [stocks_data]
 
-                    opportunities.append(StockResearch(
-                        symbol=stock.get("symbol", ""),
-                        company_name=stock.get("company_name", ""),
-                        recommendation=Recommendation(stock.get("recommendation", "BUY")),
-                        confidence=float(stock.get("confidence", 60)),
-                        risk_level=risk_level,
-                        current_price=stock.get("current_price"),
-                        target_price=stock.get("target_price"),
-                        stop_loss=stock.get("stop_loss"),
-                        upside_potential=stock.get("upside_potential"),
-                        news_sentiment=stock.get("news_sentiment", ""),
-                        technical_outlook=stock.get("technical_outlook", ""),
-                        fundamental_view=stock.get("fundamental_view", ""),
-                        catalysts=stock.get("catalysts", []),
-                        risks=stock.get("risks", []),
-                        buffett_score=int(stock.get("buffett_score", 0)),
-                        lynch_score=int(stock.get("lynch_score", 0)),
-                        jhunjhunwala_score=int(stock.get("jhunjhunwala_score", 0)),
-                        reasoning=stock.get("reasoning", ""),
-                    ))
+            opportunities = []
+            for stock in stocks_data:
+                # Parse risk level
+                risk_str = stock.get("risk_level", "MEDIUM").upper()
+                try:
+                    risk_level = RiskLevel(risk_str)
+                except ValueError:
+                    risk_level = RiskLevel.MEDIUM
 
-                return opportunities
+                opportunities.append(StockResearch(
+                    symbol=stock.get("symbol", ""),
+                    company_name=stock.get("company_name", ""),
+                    recommendation=Recommendation(stock.get("recommendation", "BUY")),
+                    confidence=float(stock.get("confidence", 60)),
+                    risk_level=risk_level,
+                    current_price=stock.get("current_price"),
+                    target_price=stock.get("target_price"),
+                    stop_loss=stock.get("stop_loss"),
+                    upside_potential=stock.get("upside_potential"),
+                    news_sentiment=stock.get("news_sentiment", ""),
+                    technical_outlook=stock.get("technical_outlook", ""),
+                    fundamental_view=stock.get("fundamental_view", ""),
+                    catalysts=stock.get("catalysts", []),
+                    risks=stock.get("risks", []),
+                    buffett_score=int(stock.get("buffett_score", 0)),
+                    lynch_score=int(stock.get("lynch_score", 0)),
+                    jhunjhunwala_score=int(stock.get("jhunjhunwala_score", 0)),
+                    reasoning=stock.get("reasoning", ""),
+                ))
+
+            return opportunities
 
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             logger.error(f"Failed to parse opportunities: {e}")
