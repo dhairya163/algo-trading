@@ -34,7 +34,7 @@ from loguru import logger
 sys.path.insert(0, str(__file__).rsplit("/", 2)[0])
 
 from config.settings import settings
-from src.analyzer.web_search_analyzer import WebSearchAnalyzer, StockResearch, Recommendation
+from src.analyzer.web_search_analyzer import WebSearchAnalyzer, StockResearch, Recommendation, RiskLevel
 from src.analyzer.groww_direct import GrowwDirectClient
 
 
@@ -429,25 +429,61 @@ class DailyAnalyzer:
             for analysis in holds_sorted:
                 self._print_stock_summary(analysis)
 
-        # BUY Recommendations (New Opportunities)
+        # BUY Recommendations (New Opportunities) - Grouped by Risk Level
         buys = results["buy_recommendations"]
         if buys:
-            print(f"\n🟢 BUY RECOMMENDATIONS - New Opportunities ({len(buys)} stocks)")
-            print("-" * 50)
-            for analysis in sorted(buys, key=lambda x: x.confidence, reverse=True):
-                self._print_stock_card(analysis, show_action="BUY")
+            # Group by risk level
+            low_risk = [b for b in buys if getattr(b, 'risk_level', RiskLevel.MEDIUM) == RiskLevel.LOW]
+            medium_risk = [b for b in buys if getattr(b, 'risk_level', RiskLevel.MEDIUM) == RiskLevel.MEDIUM]
+            high_risk = [b for b in buys if getattr(b, 'risk_level', RiskLevel.MEDIUM) == RiskLevel.HIGH]
 
-            # Suggested allocation
+            print(f"\n🟢 BUY RECOMMENDATIONS - New Opportunities ({len(buys)} stocks)")
+            print("=" * 60)
+
+            if low_risk:
+                print(f"\n   🛡️  LOW RISK - Safe & Stable ({len(low_risk)} stocks)")
+                print(f"   " + "─" * 50)
+                for analysis in sorted(low_risk, key=lambda x: x.confidence, reverse=True):
+                    self._print_stock_card(analysis, show_action="BUY")
+
+            if medium_risk:
+                print(f"\n   ⚖️  MEDIUM RISK - Balanced Growth ({len(medium_risk)} stocks)")
+                print(f"   " + "─" * 50)
+                for analysis in sorted(medium_risk, key=lambda x: x.confidence, reverse=True):
+                    self._print_stock_card(analysis, show_action="BUY")
+
+            if high_risk:
+                print(f"\n   🎲 HIGH RISK - High Reward Potential ({len(high_risk)} stocks)")
+                print(f"   " + "─" * 50)
+                for analysis in sorted(high_risk, key=lambda x: x.confidence, reverse=True):
+                    self._print_stock_card(analysis, show_action="BUY")
+
+            # Suggested allocation by risk category
             print(f"\n💰 SUGGESTED ALLOCATION (Budget: ₹{results['budget']:,.0f})")
-            print("-" * 50)
-            allocation_per_stock = results['budget'] / len(buys)
-            for analysis in buys:
-                if analysis.current_price:
-                    shares = int(allocation_per_stock / analysis.current_price)
-                    investment = shares * analysis.current_price
-                    print(f"   {analysis.symbol}: {shares} shares @ ₹{analysis.current_price:,.2f} = ₹{investment:,.2f}")
-                else:
-                    print(f"   {analysis.symbol}: ~₹{allocation_per_stock:,.0f} (price TBD)")
+            print("-" * 60)
+            # Allocate: 50% Low Risk, 30% Medium Risk, 20% High Risk
+            allocations = {
+                "LOW": (0.50 if low_risk else 0, low_risk),
+                "MEDIUM": (0.30 if medium_risk else 0, medium_risk),
+                "HIGH": (0.20 if high_risk else 0, high_risk),
+            }
+            # Redistribute if a category is empty
+            total_pct = sum(a[0] for a in allocations.values())
+            if total_pct > 0:
+                for risk_name, (pct, stocks) in allocations.items():
+                    if stocks:
+                        normalized_pct = pct / total_pct
+                        risk_budget = results['budget'] * normalized_pct
+                        per_stock = risk_budget / len(stocks)
+                        emoji = {"LOW": "🛡️", "MEDIUM": "⚖️", "HIGH": "🎲"}[risk_name]
+                        print(f"\n   {emoji} {risk_name} RISK (₹{risk_budget:,.0f} - {normalized_pct*100:.0f}% of budget):")
+                        for analysis in stocks:
+                            if analysis.current_price:
+                                shares = int(per_stock / analysis.current_price)
+                                investment = shares * analysis.current_price
+                                print(f"      {analysis.symbol}: {shares} shares @ ₹{analysis.current_price:,.2f} = ₹{investment:,.2f}")
+                            else:
+                                print(f"      {analysis.symbol}: ~₹{per_stock:,.0f} (price TBD)")
         else:
             print(f"\n📝 No strong BUY recommendations at this time")
 
@@ -481,9 +517,18 @@ class DailyAnalyzer:
             Recommendation.SELL: "🔴",
             Recommendation.STRONG_SELL: "🔴🔴",
         }
+        risk_emoji = {
+            RiskLevel.LOW: "🛡️",
+            RiskLevel.MEDIUM: "⚖️",
+            RiskLevel.HIGH: "🎲",
+        }
 
+        risk_level = getattr(analysis, 'risk_level', RiskLevel.MEDIUM)
         print(f"\n   {emoji.get(analysis.recommendation, '')} {analysis.symbol} - {analysis.company_name}")
-        print(f"   {'─' * 45}")
+        print(f"   {'─' * 55}")
+
+        # Risk level
+        print(f"   Risk: {risk_emoji.get(risk_level, '⚖️')} {risk_level.value} | Confidence: {analysis.confidence:.0f}%")
 
         if analysis.current_price:
             print(f"   Current: ₹{analysis.current_price:,.2f}", end="")
@@ -494,7 +539,12 @@ class DailyAnalyzer:
                 print(f" | SL: ₹{analysis.stop_loss:,.2f}", end="")
             print()
 
-        print(f"   Confidence: {analysis.confidence:.0f}%")
+        # Investor scores
+        buffett = getattr(analysis, 'buffett_score', 0)
+        lynch = getattr(analysis, 'lynch_score', 0)
+        jhunjhunwala = getattr(analysis, 'jhunjhunwala_score', 0)
+        if buffett or lynch or jhunjhunwala:
+            print(f"   📊 Scores: Buffett: {buffett}/100 | Lynch: {lynch}/100 | Jhunjhunwala: {jhunjhunwala}/100")
 
         if analysis.news_sentiment:
             print(f"   📰 News: {analysis.news_sentiment[:80]}...")
@@ -519,11 +569,17 @@ class DailyAnalyzer:
             Recommendation.SELL: "🔴",
             Recommendation.STRONG_SELL: "🔴🔴",
         }
+        risk_emoji = {
+            RiskLevel.LOW: "🛡️",
+            RiskLevel.MEDIUM: "⚖️",
+            RiskLevel.HIGH: "🎲",
+        }
 
+        risk_level = getattr(analysis, 'risk_level', RiskLevel.MEDIUM)
         rec_text = analysis.recommendation.value.replace("_", " ")
         price_str = f"₹{analysis.current_price:,.2f}" if analysis.current_price else ""
 
-        print(f"   {emoji.get(analysis.recommendation, '')} {analysis.symbol:12} {rec_text:12} {price_str:>12}  ({analysis.confidence:.0f}% conf)")
+        print(f"   {emoji.get(analysis.recommendation, '')} {analysis.symbol:12} {rec_text:12} {price_str:>12}  {risk_emoji.get(risk_level, '')} {risk_level.value:6} ({analysis.confidence:.0f}%)")
 
     async def close(self):
         """Cleanup resources."""

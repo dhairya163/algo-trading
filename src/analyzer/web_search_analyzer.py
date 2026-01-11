@@ -1,17 +1,23 @@
 """
 OpenAI Web Search Analyzer for real-time stock research.
 
-Uses OpenAI's GPT-4o with web search capability to fetch latest
+Uses OpenAI's Responses API with web_search tool to fetch latest
 news, sentiment, and market data for stocks.
+
+Incorporates investment wisdom from legendary investors:
+- Warren Buffett: Value investing, economic moats, ROE > 20%, low debt
+- Peter Lynch: Growth at reasonable price, invest in what you know
+- Rakesh Jhunjhunwala: Buy right sit tight, contrarian approach
+- Radhakishan Damani: Cash flow focus, conservative approach
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-import httpx
+from openai import OpenAI
 from loguru import logger
 
 
@@ -24,6 +30,13 @@ class Recommendation(str, Enum):
     STRONG_SELL = "STRONG_SELL"
 
 
+class RiskLevel(str, Enum):
+    """Risk level categories."""
+    LOW = "LOW"        # Blue chips, consistent performers, low volatility
+    MEDIUM = "MEDIUM"  # Mid-caps, moderate volatility, growing companies
+    HIGH = "HIGH"      # Small caps, high volatility, speculative
+
+
 @dataclass
 class StockResearch:
     """Research result for a stock."""
@@ -31,6 +44,8 @@ class StockResearch:
     company_name: str
     recommendation: Recommendation
     confidence: float  # 0-100
+    risk_level: RiskLevel = RiskLevel.MEDIUM
+
     current_price: Optional[float] = None
     target_price: Optional[float] = None
     stop_loss: Optional[float] = None
@@ -42,25 +57,22 @@ class StockResearch:
     fundamental_view: str = ""
 
     # Key points
-    bull_case: list[str] = None
-    bear_case: list[str] = None
-    catalysts: list[str] = None
-    risks: list[str] = None
+    bull_case: list[str] = field(default_factory=list)
+    bear_case: list[str] = field(default_factory=list)
+    catalysts: list[str] = field(default_factory=list)
+    risks: list[str] = field(default_factory=list)
+
+    # Investor framework scores
+    buffett_score: int = 0      # Value investing score (0-100)
+    lynch_score: int = 0        # Growth at reasonable price (0-100)
+    jhunjhunwala_score: int = 0 # Contrarian opportunity (0-100)
 
     # Full reasoning
     reasoning: str = ""
-    sources: list[str] = None
+    sources: list[str] = field(default_factory=list)
 
     # Metadata
-    analyzed_at: datetime = None
-
-    def __post_init__(self):
-        self.bull_case = self.bull_case or []
-        self.bear_case = self.bear_case or []
-        self.catalysts = self.catalysts or []
-        self.risks = self.risks or []
-        self.sources = self.sources or []
-        self.analyzed_at = self.analyzed_at or datetime.now()
+    analyzed_at: datetime = field(default_factory=datetime.now)
 
     def __str__(self):
         emoji = {
@@ -70,8 +82,72 @@ class StockResearch:
             Recommendation.SELL: "🔴",
             Recommendation.STRONG_SELL: "🔴🔴",
         }
+        risk_emoji = {
+            RiskLevel.LOW: "🛡️",
+            RiskLevel.MEDIUM: "⚖️",
+            RiskLevel.HIGH: "🎲",
+        }
         price_str = f"₹{self.current_price:,.2f}" if self.current_price else "N/A"
-        return f"{emoji.get(self.recommendation, '')} {self.symbol} ({self.company_name}) - {self.recommendation.value} @ {price_str} ({self.confidence:.0f}% confidence)"
+        return f"{emoji.get(self.recommendation, '')} {self.symbol} ({self.company_name}) - {self.recommendation.value} @ {price_str} | Risk: {risk_emoji.get(self.risk_level, '')} {self.risk_level.value} ({self.confidence:.0f}% confidence)"
+
+
+# Legendary investor criteria embedded in prompts
+INVESTOR_WISDOM = """
+## LEGENDARY INVESTOR FRAMEWORKS - Apply These When Analyzing:
+
+### Warren Buffett's Criteria (Value Investing):
+- Look for companies with ROE > 15-20% consistently
+- Prefer low debt-to-equity ratio (< 0.5 ideal)
+- Seek "economic moats" - competitive advantages like strong brands, patents, network effects
+- Focus on predictable earnings and cash flows
+- Buy when price is below intrinsic value (margin of safety)
+- "Be fearful when others are greedy, greedy when others are fearful"
+
+### Peter Lynch's Criteria (Growth at Reasonable Price):
+- PEG ratio < 1 is attractive (P/E divided by earnings growth rate)
+- Look for companies you understand - "invest in what you know"
+- Categorize: Slow Growers, Stalwarts, Fast Growers, Cyclicals, Turnarounds, Asset Plays
+- Fast growers (20-50% growth) in non-hot industries are ideal
+- Avoid hot stocks in hot industries
+
+### Rakesh Jhunjhunwala's Criteria (Indian Market Focus):
+- "Buy right and sit tight" - patience is key
+- Contrarian investing - buy when others panic sell
+- Focus on India growth story - consumption, infrastructure, financials
+- Look for companies with strong promoters and management
+- Diversify across sectors but concentrate in high-conviction bets
+
+### Radhakishan Damani's Criteria (Conservative Value):
+- Cash flow is more important than earnings
+- Low debt is crucial - avoid highly leveraged companies
+- Simple business models that are easy to understand
+- Strong competitive advantages in their niche
+- Management integrity and track record
+
+## RISK LEVEL CLASSIFICATION:
+
+### LOW RISK (🛡️):
+- Large-cap stocks (market cap > ₹50,000 Cr)
+- Consistent dividend payers
+- Beta < 1, low volatility
+- Strong balance sheet, minimal debt
+- Examples: HDFC Bank, TCS, Reliance, ITC, HUL
+
+### MEDIUM RISK (⚖️):
+- Mid-cap stocks (₹10,000 - ₹50,000 Cr market cap)
+- Growing companies with moderate debt
+- Beta around 1, moderate volatility
+- Good fundamentals but less proven track record
+- Examples: Most Nifty Next 50 stocks
+
+### HIGH RISK (🎲):
+- Small-cap stocks (< ₹10,000 Cr market cap)
+- High growth but unproven business models
+- Beta > 1.5, high volatility
+- May have high debt or negative cash flows
+- New IPOs, turnaround stories, speculative plays
+- Examples: Recent IPOs, penny stocks, highly leveraged companies
+"""
 
 
 class WebSearchAnalyzer:
@@ -88,17 +164,11 @@ class WebSearchAnalyzer:
 
         Args:
             api_key: OpenAI API key
-            model: Model to use (gpt-4o recommended for web search)
+            model: Model to use (gpt-4o for web search via Responses API)
         """
         self.api_key = api_key
         self.model = model
-        self._client = httpx.AsyncClient(
-            timeout=120.0,  # Longer timeout for web search
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            }
-        )
+        self._client = OpenAI(api_key=api_key)
 
     async def research_stock(
         self,
@@ -127,32 +197,41 @@ class WebSearchAnalyzer:
         context = ""
         if is_existing_holding and avg_cost and quantity:
             investment = avg_cost * quantity
+            pnl = ((current_price or avg_cost) - avg_cost) * quantity
+            pnl_pct = ((current_price or avg_cost) / avg_cost - 1) * 100 if avg_cost > 0 else 0
             context = f"""
 This is an EXISTING HOLDING in the user's portfolio:
 - Quantity: {quantity} shares
 - Average Cost: ₹{avg_cost:,.2f}
 - Investment Value: ₹{investment:,.2f}
-- Current Price: ₹{current_price:,.2f} (if available)
+- Current Price: ₹{current_price:,.2f} (if known)
+- P&L: ₹{pnl:,.2f} ({pnl_pct:+.1f}%)
 """
 
         prompt = f"""Research and analyze {company_name} ({symbol}.NS) - an Indian stock listed on NSE.
 
 {context}
 
+{INVESTOR_WISDOM}
+
 SEARCH FOR AND ANALYZE:
 1. **Latest News** (last 7 days): Any major announcements, results, deals, or events
 2. **Current Price & Technicals**: Live price, 52-week range, moving averages, RSI, support/resistance
-3. **Recent Quarterly Results**: Latest earnings, revenue growth, profit margins
-4. **Analyst Ratings**: Recent broker upgrades/downgrades, target prices
-5. **Sector Trends**: How the sector is performing, any tailwinds/headwinds
-6. **FII/DII Activity**: Recent institutional buying/selling patterns
-7. **Market Sentiment**: Social media buzz, retail investor sentiment
+3. **Recent Quarterly Results**: Latest earnings, revenue growth, profit margins, ROE
+4. **Debt & Balance Sheet**: Debt-to-equity ratio, cash flows, financial health
+5. **Analyst Ratings**: Recent broker upgrades/downgrades, target prices
+6. **Sector Trends**: How the sector is performing, any tailwinds/headwinds
+7. **FII/DII Activity**: Recent institutional buying/selling patterns
+8. **Competitive Position**: Market share, economic moat, competitive advantages
 
-Based on your research, provide a comprehensive analysis in the following JSON format:
+Apply the legendary investor frameworks above to score this stock.
+
+Based on your research, provide analysis in the following JSON format:
 {{
     "recommendation": "STRONG_BUY|BUY|HOLD|SELL|STRONG_SELL",
     "confidence": <0-100>,
-    "current_price": <current trading price or null>,
+    "risk_level": "LOW|MEDIUM|HIGH",
+    "current_price": <current trading price>,
     "target_price": <12-month target price>,
     "stop_loss": <suggested stop loss price>,
     "upside_potential": <percentage upside to target>,
@@ -163,54 +242,48 @@ Based on your research, provide a comprehensive analysis in the following JSON f
     "bear_case": ["point 1", "point 2"],
     "catalysts": ["upcoming catalyst 1", "catalyst 2"],
     "risks": ["key risk 1", "risk 2"],
-    "reasoning": "<2-3 paragraph detailed reasoning for recommendation>",
-    "sources": ["source 1", "source 2"]
+    "buffett_score": <0-100 based on value investing criteria>,
+    "lynch_score": <0-100 based on GARP criteria>,
+    "jhunjhunwala_score": <0-100 based on contrarian/India growth criteria>,
+    "reasoning": "<2-3 paragraph detailed reasoning including which investor framework supports this>",
+    "sources": ["source 1 URL", "source 2 URL"]
 }}
 
 IMPORTANT GUIDELINES:
-- Use REAL, CURRENT data from your web search - do not hallucinate prices or news
+- Use REAL, CURRENT data from your web search - cite actual news and prices
 - Be specific about dates and figures from news articles
 - For existing holdings, factor in the user's cost basis when making recommendations
-- Be conservative with STRONG_BUY/STRONG_SELL - reserve for clear opportunities
-- Include specific price targets and stop losses in INR
-- Cite your sources for key data points"""
+- Apply investor frameworks: High Buffett score = strong fundamentals, High Lynch score = good growth value, High Jhunjhunwala score = contrarian opportunity
+- Classify risk level based on market cap, volatility, debt levels
+- Include specific price targets and stop losses in INR"""
 
         try:
-            # Use OpenAI Responses API with web search
-            response = await self._client.post(
-                "https://api.openai.com/v1/responses",
-                json={
-                    "model": self.model,
-                    "tools": [{"type": "web_search"}],
-                    "input": prompt,
-                }
+            # Use OpenAI Responses API with web_search tool
+            response = self._client.responses.create(
+                model=self.model,
+                tools=[{"type": "web_search"}],
+                input=prompt,
             )
 
-            if response.status_code == 404:
-                # Fallback to chat completions if Responses API not available
-                return await self._research_with_chat(
-                    symbol, company_name, current_price, avg_cost, quantity, is_existing_holding
-                )
-
-            response.raise_for_status()
-            data = response.json()
-
-            # Extract the text response
+            # Extract the output text from response
             output_text = ""
-            for item in data.get("output", []):
-                if item.get("type") == "message":
-                    for content in item.get("content", []):
-                        if content.get("type") == "output_text":
-                            output_text = content.get("text", "")
+            for item in response.output:
+                if item.type == "message":
+                    for content in item.content:
+                        if content.type == "output_text":
+                            output_text = content.text
                             break
 
-            return self._parse_research_response(symbol, company_name, output_text)
+            if output_text:
+                return self._parse_research_response(symbol, company_name, output_text)
 
         except Exception as e:
-            logger.warning(f"Web search API failed for {symbol}, using chat fallback: {e}")
-            return await self._research_with_chat(
-                symbol, company_name, current_price, avg_cost, quantity, is_existing_holding
-            )
+            logger.warning(f"Responses API failed for {symbol}: {e}, using chat fallback")
+
+        # Fallback to chat completions
+        return await self._research_with_chat(
+            symbol, company_name, current_price, avg_cost, quantity, is_existing_holding
+        )
 
     async def _research_with_chat(
         self,
@@ -227,7 +300,7 @@ IMPORTANT GUIDELINES:
         if is_existing_holding and avg_cost and quantity:
             investment = avg_cost * quantity
             pnl = ((current_price or avg_cost) - avg_cost) * quantity
-            pnl_pct = ((current_price or avg_cost) / avg_cost - 1) * 100
+            pnl_pct = ((current_price or avg_cost) / avg_cost - 1) * 100 if avg_cost > 0 else 0
             context = f"""
 This is an EXISTING HOLDING:
 - Quantity: {quantity} shares
@@ -237,9 +310,11 @@ This is an EXISTING HOLDING:
 - P&L: ₹{pnl:,.2f} ({pnl_pct:+.1f}%)
 """
 
-        system_prompt = """You are an expert Indian stock market analyst. Analyze stocks with comprehensive research.
-Your knowledge is current as of January 2025. For recent data, make reasonable assumptions based on trends.
-Always return analysis in valid JSON format."""
+        system_prompt = f"""You are an expert Indian stock market analyst who follows the investment philosophies of Warren Buffett, Peter Lynch, Rakesh Jhunjhunwala, and Radhakishan Damani.
+
+{INVESTOR_WISDOM}
+
+Analyze stocks comprehensively and return analysis in valid JSON format."""
 
         user_prompt = f"""Analyze {company_name} ({symbol}) - NSE listed stock.
 {context}
@@ -248,7 +323,8 @@ Provide analysis in this JSON format:
 {{
     "recommendation": "STRONG_BUY|BUY|HOLD|SELL|STRONG_SELL",
     "confidence": <0-100>,
-    "current_price": <estimated current price or null>,
+    "risk_level": "LOW|MEDIUM|HIGH",
+    "current_price": <estimated current price>,
     "target_price": <12-month target>,
     "stop_loss": <stop loss level>,
     "upside_potential": <percentage>,
@@ -259,29 +335,26 @@ Provide analysis in this JSON format:
     "bear_case": ["point 1", "point 2"],
     "catalysts": ["catalyst 1"],
     "risks": ["risk 1"],
-    "reasoning": "<detailed reasoning>",
+    "buffett_score": <0-100>,
+    "lynch_score": <0-100>,
+    "jhunjhunwala_score": <0-100>,
+    "reasoning": "<detailed reasoning with investor framework analysis>",
     "sources": ["General market knowledge"]
 }}
 
-Be specific with price targets in INR. For holdings, consider the cost basis."""
+Be specific with price targets in INR. Apply investor frameworks to score the stock."""
 
         try:
-            response = await self._client.post(
-                "https://api.openai.com/v1/chat/completions",
-                json={
-                    "model": self.model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    "temperature": 0.3,
-                }
+            response = self._client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3,
             )
 
-            response.raise_for_status()
-            data = response.json()
-
-            content = data["choices"][0]["message"]["content"]
+            content = response.choices[0].message.content
             return self._parse_research_response(symbol, company_name, content)
 
         except Exception as e:
@@ -291,6 +364,7 @@ Be specific with price targets in INR. For holdings, consider the cost basis."""
                 company_name=company_name,
                 recommendation=Recommendation.HOLD,
                 confidence=30,
+                risk_level=RiskLevel.MEDIUM,
                 reasoning=f"Unable to complete analysis: {str(e)}",
             )
 
@@ -311,11 +385,19 @@ Be specific with price targets in INR. For holdings, consider the cost basis."""
                 json_str = response_text[json_start:json_end]
                 data = json.loads(json_str)
 
+                # Parse risk level
+                risk_str = data.get("risk_level", "MEDIUM").upper()
+                try:
+                    risk_level = RiskLevel(risk_str)
+                except ValueError:
+                    risk_level = RiskLevel.MEDIUM
+
                 return StockResearch(
                     symbol=symbol,
                     company_name=company_name,
                     recommendation=Recommendation(data.get("recommendation", "HOLD")),
                     confidence=float(data.get("confidence", 50)),
+                    risk_level=risk_level,
                     current_price=data.get("current_price"),
                     target_price=data.get("target_price"),
                     stop_loss=data.get("stop_loss"),
@@ -327,6 +409,9 @@ Be specific with price targets in INR. For holdings, consider the cost basis."""
                     bear_case=data.get("bear_case", []),
                     catalysts=data.get("catalysts", []),
                     risks=data.get("risks", []),
+                    buffett_score=int(data.get("buffett_score", 0)),
+                    lynch_score=int(data.get("lynch_score", 0)),
+                    jhunjhunwala_score=int(data.get("jhunjhunwala_score", 0)),
                     reasoning=data.get("reasoning", ""),
                     sources=data.get("sources", []),
                 )
@@ -339,6 +424,7 @@ Be specific with price targets in INR. For holdings, consider the cost basis."""
             company_name=company_name,
             recommendation=Recommendation.HOLD,
             confidence=40,
+            risk_level=RiskLevel.MEDIUM,
             reasoning=response_text[:500] if response_text else "Analysis parsing failed",
         )
 
@@ -347,98 +433,213 @@ Be specific with price targets in INR. For holdings, consider the cost basis."""
         sector: Optional[str] = None,
         budget: float = 100000,
         existing_symbols: list[str] = None,
+        risk_preference: Optional[str] = None,  # "LOW", "MEDIUM", "HIGH", or None for all
     ) -> list[StockResearch]:
         """
-        Find new stock opportunities in the market.
+        Find new stock opportunities in the market using legendary investor wisdom.
 
         Args:
             sector: Specific sector to focus on (optional)
             budget: Investment budget in INR
             existing_symbols: Symbols already in portfolio (to avoid)
+            risk_preference: Filter by risk level (optional)
 
         Returns:
-            List of StockResearch for recommended buys
+            List of StockResearch for recommended buys categorized by risk
         """
         existing_symbols = existing_symbols or []
         exclude_str = f"Exclude these stocks (already held): {', '.join(existing_symbols)}" if existing_symbols else ""
 
         sector_focus = f"Focus on the {sector} sector." if sector else "Consider all sectors."
 
+        risk_filter = ""
+        if risk_preference:
+            risk_filter = f"Focus primarily on {risk_preference} RISK stocks as per user preference."
+
         prompt = f"""Find the TOP 5 Indian stocks to BUY right now for a ₹{budget:,.0f} investment.
+Search for the latest market news, stock performance, and analyst recommendations.
 
 {sector_focus}
 {exclude_str}
+{risk_filter}
+
+{INVESTOR_WISDOM}
+
+SEARCH FOR STOCKS THAT MEET THESE CRITERIA:
+
+**For LOW RISK recommendations:**
+- Large-cap Nifty 50 stocks with consistent dividends
+- Strong balance sheets, ROE > 15%, low debt
+- Stocks Warren Buffett would approve of
+
+**For MEDIUM RISK recommendations:**
+- Mid-cap growth stocks with good fundamentals
+- Companies Peter Lynch would call "Stalwarts" or "Fast Growers"
+- Reasonable valuations (PEG < 1.5)
+
+**For HIGH RISK recommendations:**
+- Small-cap stocks with high growth potential
+- Turnaround stories or contrarian plays Rakesh Jhunjhunwala would like
+- Recent IPOs with strong business models
 
 SEARCH FOR:
-1. Stocks with recent positive momentum and good fundamentals
+1. Stocks with recent positive momentum and strong fundamentals
 2. Recent breakouts or accumulation patterns
 3. Upcoming catalysts (earnings, deals, launches)
-4. Stocks with institutional buying
-5. Undervalued opportunities in growth sectors
+4. Stocks with institutional buying (FII/DII)
+5. Undervalued opportunities based on legendary investor criteria
 
-For each stock, provide comprehensive research including:
-- Why it's a good buy NOW
-- Recent news and developments
-- Technical levels (entry, target, stop loss)
-- Risk/reward ratio
-
-Return as a JSON array:
+Return as a JSON array with stocks across ALL THREE risk categories:
 [
     {{
         "symbol": "SYMBOL",
         "company_name": "Full Company Name",
         "recommendation": "BUY|STRONG_BUY",
         "confidence": <0-100>,
+        "risk_level": "LOW|MEDIUM|HIGH",
         "current_price": <price>,
         "target_price": <target>,
         "stop_loss": <stop loss>,
         "upside_potential": <percentage>,
         "suggested_allocation": <percentage of budget>,
-        "news_sentiment": "<recent news>",
+        "news_sentiment": "<recent news from web search>",
         "technical_outlook": "<technicals>",
         "fundamental_view": "<fundamentals>",
         "catalysts": ["catalyst 1", "catalyst 2"],
         "risks": ["risk 1"],
-        "reasoning": "<why to buy now>"
+        "buffett_score": <0-100>,
+        "lynch_score": <0-100>,
+        "jhunjhunwala_score": <0-100>,
+        "reasoning": "<why to buy now, which investor framework supports this>"
     }}
 ]
 
-Focus on liquid, well-known NSE stocks. Prioritize quality over speculation."""
+IMPORTANT:
+- Include at least 1-2 stocks from each risk category (LOW, MEDIUM, HIGH)
+- Use REAL data from web search - cite actual news and current prices
+- Focus on liquid, NSE-listed stocks
+- Higher Buffett score = value play, Higher Lynch score = growth play, Higher Jhunjhunwala score = contrarian play"""
 
         try:
-            response = await self._client.post(
-                "https://api.openai.com/v1/chat/completions",
-                json={
-                    "model": self.model,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "You are an expert Indian stock market analyst. Find the best investment opportunities. Return valid JSON."
-                        },
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0.4,
-                }
+            # Use Responses API with web search
+            response = self._client.responses.create(
+                model=self.model,
+                tools=[{"type": "web_search"}],
+                input=prompt,
             )
 
-            response.raise_for_status()
-            data = response.json()
-            content = data["choices"][0]["message"]["content"]
+            # Extract output text
+            output_text = ""
+            for item in response.output:
+                if item.type == "message":
+                    for content in item.content:
+                        if content.type == "output_text":
+                            output_text = content.text
+                            break
 
+            if output_text:
+                return self._parse_opportunities_response(output_text)
+
+        except Exception as e:
+            logger.warning(f"Responses API failed for opportunities: {e}, using chat fallback")
+
+        # Fallback to chat completions
+        return await self._find_opportunities_with_chat(
+            sector, budget, existing_symbols, risk_preference
+        )
+
+    async def _find_opportunities_with_chat(
+        self,
+        sector: Optional[str],
+        budget: float,
+        existing_symbols: list[str],
+        risk_preference: Optional[str],
+    ) -> list[StockResearch]:
+        """Fallback to chat completions for finding opportunities."""
+
+        existing_symbols = existing_symbols or []
+        exclude_str = f"Exclude: {', '.join(existing_symbols)}" if existing_symbols else ""
+        sector_focus = f"Focus on {sector}." if sector else ""
+
+        system_prompt = f"""You are an expert Indian stock market analyst combining the wisdom of Warren Buffett, Peter Lynch, Rakesh Jhunjhunwala, and Radhakishan Damani.
+
+{INVESTOR_WISDOM}
+
+Find the best investment opportunities. Return valid JSON array."""
+
+        user_prompt = f"""Find TOP 5 Indian stocks to BUY for ₹{budget:,.0f} budget.
+{sector_focus}
+{exclude_str}
+
+Return JSON array with stocks across LOW, MEDIUM, and HIGH risk categories:
+[
+    {{
+        "symbol": "SYMBOL",
+        "company_name": "Name",
+        "recommendation": "BUY|STRONG_BUY",
+        "confidence": <0-100>,
+        "risk_level": "LOW|MEDIUM|HIGH",
+        "current_price": <price>,
+        "target_price": <target>,
+        "stop_loss": <stop loss>,
+        "upside_potential": <percentage>,
+        "news_sentiment": "<news>",
+        "technical_outlook": "<technicals>",
+        "fundamental_view": "<fundamentals>",
+        "catalysts": ["catalyst"],
+        "risks": ["risk"],
+        "buffett_score": <0-100>,
+        "lynch_score": <0-100>,
+        "jhunjhunwala_score": <0-100>,
+        "reasoning": "<reasoning with investor framework>"
+    }}
+]
+
+Include 1-2 stocks from each risk category. Use current market knowledge."""
+
+        try:
+            response = self._client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.4,
+            )
+
+            content = response.choices[0].message.content
+            return self._parse_opportunities_response(content)
+
+        except Exception as e:
+            logger.error(f"Failed to find opportunities: {e}")
+            return []
+
+    def _parse_opportunities_response(self, response_text: str) -> list[StockResearch]:
+        """Parse opportunities response into list of StockResearch."""
+
+        try:
             # Parse JSON array
-            json_start = content.find("[")
-            json_end = content.rfind("]") + 1
+            json_start = response_text.find("[")
+            json_end = response_text.rfind("]") + 1
 
             if json_start >= 0 and json_end > json_start:
-                stocks_data = json.loads(content[json_start:json_end])
+                stocks_data = json.loads(response_text[json_start:json_end])
 
                 opportunities = []
                 for stock in stocks_data:
+                    # Parse risk level
+                    risk_str = stock.get("risk_level", "MEDIUM").upper()
+                    try:
+                        risk_level = RiskLevel(risk_str)
+                    except ValueError:
+                        risk_level = RiskLevel.MEDIUM
+
                     opportunities.append(StockResearch(
                         symbol=stock.get("symbol", ""),
                         company_name=stock.get("company_name", ""),
                         recommendation=Recommendation(stock.get("recommendation", "BUY")),
                         confidence=float(stock.get("confidence", 60)),
+                        risk_level=risk_level,
                         current_price=stock.get("current_price"),
                         target_price=stock.get("target_price"),
                         stop_loss=stock.get("stop_loss"),
@@ -448,17 +649,19 @@ Focus on liquid, well-known NSE stocks. Prioritize quality over speculation."""
                         fundamental_view=stock.get("fundamental_view", ""),
                         catalysts=stock.get("catalysts", []),
                         risks=stock.get("risks", []),
+                        buffett_score=int(stock.get("buffett_score", 0)),
+                        lynch_score=int(stock.get("lynch_score", 0)),
+                        jhunjhunwala_score=int(stock.get("jhunjhunwala_score", 0)),
                         reasoning=stock.get("reasoning", ""),
                     ))
 
                 return opportunities
 
-        except Exception as e:
-            logger.error(f"Failed to find opportunities: {e}")
-            return []
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            logger.error(f"Failed to parse opportunities: {e}")
 
         return []
 
     async def close(self):
-        """Close the HTTP client."""
-        await self._client.aclose()
+        """Close the client (no-op for sync client)."""
+        pass
